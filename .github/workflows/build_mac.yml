@@ -114,16 +114,18 @@ jobs:
           LAUNCHER
           chmod +x "dist/Запустити_Mac.command"
 
-      - name: Package ZIP artifact
-        run: |
-          cd dist
-          zip -r -y ../CharmDate_MediaBot_V99_ARM64.zip \
-            "CharmDateBot.app" \
-            "Запустити_Mac.command"
+      - name: Package ZIP
+  run: |
+    find dist/CharmDateBot.app -name "*.pyc" -delete
+    find dist/CharmDateBot.app -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+    cd dist
+    zip -r -y ../CharmDate_MediaBot_V99_Universal2.zip \
+      "CharmDateBot.app" \
+      "Запустити_Mac.command"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: CharmDate_MediaBot_V99_Mac_ARM64
           path: CharmDate_MediaBot_V99_ARM64.zip
-          retention-days: 14
+          retention-days: 3
