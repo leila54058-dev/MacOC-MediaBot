@@ -6,14 +6,10 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    # macos-14 = Apple Silicon (ARM64, безкоштовний, найшвидший)
-    # ВАЖЛИВО: НЕ використовуємо --target-arch universal2 на ARM-раннері,
-    # бо setup-python встановлює ARM64 Python, а PyInstaller не може
-    # крос-компілювати universal2 з arm64-only Python.
-    # ARM64 app → працює нативно на всіх Mac з 2020 року (M1/M2/M3/M4).
-    # На Intel Mac (2019 і старіше) → працює через Rosetta 2 без змін.
-    runs-on: macos-14
+  build-arm:
+    runs-on: macos-14   # ARM64
+  build-intel:
+    runs-on: macos-13   # Intel x86_64
 
     steps:
       - name: Checkout code
