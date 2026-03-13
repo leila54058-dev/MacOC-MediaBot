@@ -1,22 +1,27 @@
----
-name: Build macOS App (ARM64 Native)
+name: Build macOS App (ARM64 + Intel)
+
 on:
   push:
-    branches:
-      - main
-  workflow_dispatch: null
+    branches: [ main ]
+  workflow_dispatch:
+
 jobs:
+
+  # ══════════════════════════════════════════
+  # JOB 1 — Apple Silicon (M1/M2/M3/M4)
+  # ══════════════════════════════════════════
   build-arm:
     runs-on: macos-14
-  build-intel:
-    runs-on: macos-13
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
@@ -28,51 +33,19 @@ jobs:
                       pillow \
                       pillow-heif \
                       urllib3
+
       - name: Download ARM64 FFmpeg & FFprobe
-        run: >
+        run: |
           mkdir -p bin
-
-
-          # --- ffmpeg ---
-
-          # evermeet.cx публікує окремі сторінки для arm64.
-
-          # Парсимо актуальне посилання, щоб не залежати від хардкод-URL.
-
-          FFMPEG_URL=$(curl -sL "https://evermeet.cx/ffmpeg/" \
-            | grep -o 'href="[^"]*ffmpeg-[^"]*\.zip"' \
-            | grep arm64 | head -1 \
-            | sed 's/href="//' | sed 's/"//')
-
-          if [ -z "$FFMPEG_URL" ]; then
-            echo "evermeet.cx не знайшов arm64 посилання, використовуємо Homebrew"
-            brew install ffmpeg
-            cp "$(which ffmpeg)"  bin/ffmpeg
-            cp "$(which ffprobe)" bin/ffprobe
-          else
-            curl -L "https://evermeet.cx${FFMPEG_URL}" -o ffmpeg.zip
-            unzip -o ffmpeg.zip -d bin
-
-            FFPROBE_URL=$(curl -sL "https://evermeet.cx/ffmpeg/" \
-              | grep -o 'href="[^"]*ffprobe-[^"]*\.zip"' \
-              | grep arm64 | head -1 \
-              | sed 's/href="//' | sed 's/"//')
-            curl -L "https://evermeet.cx${FFPROBE_URL}" -o ffprobe.zip
-            unzip -o ffprobe.zip -d bin
-          fi
-
-
+          brew install ffmpeg
+          cp "$(which ffmpeg)"  bin/ffmpeg
+          cp "$(which ffprobe)" bin/ffprobe
           chmod +x bin/ffmpeg bin/ffprobe
-
-          echo "=== Перевірка FFmpeg ==="
-
+          echo "=== FFmpeg архітектура ==="
           file bin/ffmpeg
 
-          bin/ffmpeg -version | head -2
-      - name: Build App with PyInstaller
+      - name: Build ARM64 App
         run: |
-          # БЕЗ --target-arch universal2 — будуємо нативний ARM64.
-          # Якщо потрібен Universal2, дивись коментар вгорі файлу.
           pyinstaller --noconfirm --onedir --windowed \
             --name "CharmDateBot" \
             --add-data "bin:bin" \
@@ -85,45 +58,112 @@ jobs:
             --collect-all customtkinter \
             --collect-all pillow_heif \
             FinalBot.py
-      - name: Verify build architecture
-        run: |
-          EXE="dist/CharmDateBot.app/Contents/MacOS/CharmDateBot"
-          echo "=== Архітектура зібраного .app ==="
-          file "$EXE"
-          # Очікуємо: Mach-O 64-bit executable arm64
-      - name: Create launcher script (обхід macOS quarantine)
+
+      - name: Create launcher script
         run: |
           cat > "dist/Запустити_Mac.command" << 'LAUNCHER'
           #!/bin/bash
           DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
           APP="$DIR/CharmDateBot.app"
-          echo "================================================"
-          echo "   CharmDate Media Bot — First Launch Fix"
-          echo "================================================"
-          echo ""
-          echo "Знімаємо quarantine (може запитати пароль)..."
-          # Спробуємо без sudo, якщо не вийде — з sudo
           xattr -rd com.apple.quarantine "$APP" 2>/dev/null || \
             sudo xattr -rd com.apple.quarantine "$APP" 2>/dev/null || true
-          echo ""
-          echo "Запускаємо програму..."
           open "$APP"
           LAUNCHER
           chmod +x "dist/Запустити_Mac.command"
+
       - name: Package ZIP
-        run: >
+        run: |
           find dist/CharmDateBot.app -name "*.pyc" -delete
-
           find dist/CharmDateBot.app -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-
           cd dist
-
-          zip -r -y ../CharmDate_MediaBot_V99_ARM64.zip \
+          zip -r -y ../CharmDateBot_ARM64_M1_M2_M3.zip \
             "CharmDateBot.app" \
             "Запустити_Mac.command"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CharmDate_MediaBot_V99_Mac_ARM64
-          path: CharmDate_MediaBot_V99_ARM64.zip
+          name: CharmDateBot_ARM64_AppleSilicon
+          path: CharmDateBot_ARM64_M1_M2_M3.zip
+          retention-days: 3
+
+  # ══════════════════════════════════════════
+  # JOB 2 — Intel Mac (2019 і старіші)
+  # ══════════════════════════════════════════
+  build-intel:
+    runs-on: macos-13
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller \
+                      customtkinter \
+                      requests \
+                      beautifulsoup4 \
+                      opencv-python-headless \
+                      pillow \
+                      pillow-heif \
+                      urllib3
+
+      - name: Download Intel FFmpeg & FFprobe
+        run: |
+          mkdir -p bin
+          curl -L "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip" -o ffmpeg.zip
+          unzip -o ffmpeg.zip -d bin
+          curl -L "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o ffprobe.zip
+          unzip -o ffprobe.zip -d bin
+          chmod +x bin/ffmpeg bin/ffprobe
+          echo "=== FFmpeg архітектура ==="
+          file bin/ffmpeg
+
+      - name: Build Intel App
+        run: |
+          pyinstaller --noconfirm --onedir --windowed \
+            --name "CharmDateBot" \
+            --add-data "bin:bin" \
+            --hidden-import PIL.ImageTk \
+            --hidden-import cv2 \
+            --hidden-import pillow_heif \
+            --hidden-import bs4 \
+            --hidden-import urllib3 \
+            --hidden-import requests \
+            --collect-all customtkinter \
+            --collect-all pillow_heif \
+            FinalBot.py
+
+      - name: Create launcher script
+        run: |
+          cat > "dist/Запустити_Mac.command" << 'LAUNCHER'
+          #!/bin/bash
+          DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+          APP="$DIR/CharmDateBot.app"
+          xattr -rd com.apple.quarantine "$APP" 2>/dev/null || \
+            sudo xattr -rd com.apple.quarantine "$APP" 2>/dev/null || true
+          open "$APP"
+          LAUNCHER
+          chmod +x "dist/Запустити_Mac.command"
+
+      - name: Package ZIP
+        run: |
+          find dist/CharmDateBot.app -name "*.pyc" -delete
+          find dist/CharmDateBot.app -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+          cd dist
+          zip -r -y ../CharmDateBot_Intel_x86.zip \
+            "CharmDateBot.app" \
+            "Запустити_Mac.command"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CharmDateBot_Intel_x86
+          path: CharmDateBot_Intel_x86.zip
           retention-days: 3
