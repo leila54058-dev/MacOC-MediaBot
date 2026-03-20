@@ -3,13 +3,7 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog
 import requests
-import os, re, base64, hashlib, time, threading, json, subprocess, sys, platform
-from concurrent.futures import ThreadPoolExecutor, as_completed
-try:
-    import winsound
-    WINSOUND = True
-except ImportError:
-    WINSOUND = False
+import os, re, base64, hashlib, time, threading, json, subprocess, sys, platform, tempfile
 from bs4 import BeautifulSoup
 import cv2
 import urllib3
@@ -25,36 +19,43 @@ except ImportError:
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- ГЛОБАЛЬНІ ШЛЯХИ ---
+# ==================== ЗВУК ====================
+try:
+    import winsound
+    WINSOUND = True
+except ImportError:
+    WINSOUND = False
+
+# --- ГЛОБАЛЬНІ ШЛЯХИ (Mac .app bundle aware) ---
 if getattr(sys, 'frozen', False):
-    # sys._MEIPASS — де PyInstaller розпаковує --add-data ресурси (bin/ffmpeg тут)
-    _MEIPASS = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
-    _BIN_DIR = os.path.join(_MEIPASS, 'bin')
+    _exe_dir = os.path.dirname(sys.executable)
     if platform.system() == 'Darwin':
-        # macOS .app bundle — read-only; записуємо дані в ~/Library/Application Support
-        APP_DIR = os.path.join(os.path.expanduser('~'), 'Library',
-                               'Application Support', 'CharmDateBot')
+        # FIX: .app bundle read-only — пишемо дані в ~/Library/Application Support/
+        APP_DIR  = os.path.join(os.path.expanduser('~'), 'Library',
+                                'Application Support', 'CharmDateBot')
         os.makedirs(APP_DIR, exist_ok=True)
+        # FIX: bin/ знаходиться в _MEIPASS (поруч з виконуваним файлом)
+        _BIN_DIR = os.path.join(_exe_dir, 'bin')
+        if not os.path.isdir(_BIN_DIR):
+            _BIN_DIR = os.path.normpath(
+                os.path.join(_exe_dir, '..', 'Resources', 'bin'))
     else:
-        APP_DIR = os.path.dirname(sys.executable)
+        APP_DIR  = _exe_dir
+        _BIN_DIR = os.path.join(APP_DIR, 'bin')
 else:
-    APP_DIR = os.path.dirname(os.path.abspath(__file__))
+    APP_DIR  = os.path.dirname(os.path.abspath(__file__))
     _BIN_DIR = os.path.join(APP_DIR, 'bin')
 
 os.chdir(APP_DIR)
 CONFIG_FILE = os.path.join(APP_DIR, 'profiles_v99.json')
-TEMP_IMAGE  = os.path.join(APP_DIR, 'cd_temp.jpg')
-TEMP_VIDEO  = os.path.join(APP_DIR, 'cd_video.mp4')
-TEMP_THUMB  = os.path.join(APP_DIR, 'cd_thumb.jpg')
+
+# FIX: тимчасові файли в системному /tmp — APP_DIR може бути недоступний для запису
+_TMP       = tempfile.gettempdir()
+TEMP_IMAGE = os.path.join(_TMP, 'cd_temp.jpg')
+TEMP_VIDEO = os.path.join(_TMP, 'cd_video.mp4')
+TEMP_THUMB = os.path.join(_TMP, 'cd_thumb.jpg')
 
 ctk.set_appearance_mode('Dark')
-
-# ── Drag & Drop support (optional) ──
-try:
-    from tkinterdnd2 import TkinterDnD, DND_FILES
-    _DND_AVAILABLE = True
-except ImportError:
-    _DND_AVAILABLE = False
 
 class PhotoUploaderApp(ctk.CTk):
     def __init__(self):
@@ -90,17 +91,28 @@ class PhotoUploaderApp(ctk.CTk):
         self.video_after_id      = None
         self.current_playing_path = None
 
-        # Activate TkinterDnD on this CTk window if available
-        if _DND_AVAILABLE:
-            try:
-                TkinterDnD._require(self)
-            except Exception:
-                pass
+        # FIX MAC: chmod ffmpeg/ffprobe — файли всередині .app bundle
+        # можуть не мати біту виконання після розпакування
+        if platform.system() == 'Darwin':
+            for _name in ('ffmpeg', 'ffprobe'):
+                for _d in [_BIN_DIR,
+                           APP_DIR,
+                           os.path.join(os.path.dirname(sys.executable), 'bin')
+                               if getattr(sys, 'frozen', False) else '',
+                           os.path.normpath(os.path.join(
+                               os.path.dirname(sys.executable), '..', 'Resources', 'bin'))
+                               if getattr(sys, 'frozen', False) else '']:
+                    if not _d:
+                        continue
+                    _p = os.path.join(_d, _name)
+                    if os.path.exists(_p):
+                        try:
+                            os.chmod(_p, 0o755)
+                        except:
+                            pass
 
         self._create_ui()
         self.load_config()
-        # Auto-scan if profile credentials already filled
-        self.after(800, self._auto_scan_if_ready)
 
     # =========================================================================
     # UI BUILD
@@ -201,16 +213,8 @@ class PhotoUploaderApp(ctk.CTk):
             command=self.on_album_ui_select)
         self.album_dropdown.pack(fill='x', padx=12, pady=(0,12), ipady=1)
 
-        log_hdr = tk.Frame(left, bg=C['bg'])
-        log_hdr.pack(fill='x', pady=(8,3))
-        tk.Label(log_hdr, text='◈ ЛОГ', bg=C['bg'], fg=C['dim'],
-                 font=('Segoe UI',9,'bold')).pack(side='left')
-        tk.Button(log_hdr, text='💾', bg=C['bg'], fg=C['dim'], relief='flat',
-                  font=('Segoe UI',9), cursor='hand2', bd=0,
-                  command=self.save_log).pack(side='right', padx=(4,0))
-        tk.Button(log_hdr, text='🗑', bg=C['bg'], fg=C['dim'], relief='flat',
-                  font=('Segoe UI',9), cursor='hand2', bd=0,
-                  command=self.clear_log).pack(side='right')
+        tk.Label(left, text='◈ ЛОГ', bg=C['bg'], fg=C['dim'],
+                 font=('Segoe UI',9,'bold')).pack(anchor='w', pady=(8,3))
         log_outer = tk.Frame(left, bg=C['border'], bd=1)
         log_outer.pack(fill='both', expand=True)
         self.log_box = tk.Text(log_outer, font=('Consolas',10),
@@ -228,25 +232,17 @@ class PhotoUploaderApp(ctk.CTk):
         right.pack(side='right', expand=True, fill='both')
 
         step_row = tk.Frame(right, bg=C['bg'])
-        step_row.pack(fill='x', pady=(0,6))
+        step_row.pack(fill='x', pady=(0,8))
         self.btn_fetch  = self._mk_btn(step_row, '1 СКАН',    self.fetch_albums_thread)
         self.btn_select = self._mk_btn(step_row, '2 ВИБРАТИ', self.select_media)
-        self.btn_add    = self._mk_btn(step_row, '+ ДОДАТИ',  self.add_media)
         self.btn_titles = self._mk_btn(step_row, '3 НАЗВИ',   self.load_and_erase_titles)
-        for b in (self.btn_fetch, self.btn_select, self.btn_add, self.btn_titles):
-            b.pack(side='left', fill='x', expand=True, padx=2)
+        for b in (self.btn_fetch, self.btn_select, self.btn_titles):
+            b.pack(side='left', fill='x', expand=True, padx=3)
 
-        # ── Global title row ──
-        # ── Progress bar with counter ──
-        prog_row = tk.Frame(right, bg=C['bg'])
-        prog_row.pack(fill='x', pady=(0,6))
-        self._prog_bg   = tk.Frame(prog_row, bg=C['border2'], height=4)
-        self._prog_bg.pack(side='left', fill='x', expand=True)
-        self._prog_fill = tk.Frame(self._prog_bg, bg=C['accent'], height=4)
-        self._prog_fill.place(x=0, y=0, relwidth=0, height=4)
-        self._prog_lbl = tk.Label(prog_row, text='', bg=C['bg'], fg=C['dim'],
-                                  font=('Consolas',9), width=7)
-        self._prog_lbl.pack(side='left', padx=(6,0))
+        self._prog_bg   = tk.Frame(right, bg=C['border2'], height=3)
+        self._prog_bg.pack(fill='x', pady=(0,8))
+        self._prog_fill = tk.Frame(self._prog_bg, bg=C['accent'], height=3)
+        self._prog_fill.place(x=0, y=0, relwidth=0, height=3)
 
         qh = tk.Frame(right, bg=C['bg'])
         qh.pack(fill='x', pady=(0,4))
@@ -264,9 +260,6 @@ class PhotoUploaderApp(ctk.CTk):
             scrollbar_button_hover_color=C['accent'],
             corner_radius=0)
         self.scroll.pack(fill='both', expand=True)
-        # ── Drag & Drop ──
-        self._setup_dnd(self.scroll)
-        self._setup_dnd(qo)
 
         bottom = tk.Frame(right, bg=C['bg'])
         bottom.pack(fill='x', pady=(10,0))
@@ -337,35 +330,25 @@ class PhotoUploaderApp(ctk.CTk):
         menu.add_command(label='Вставити',    command=lambda: inner.event_generate('<<Paste>>'))
         menu.add_separator()
         menu.add_command(label='Вибрати все', command=lambda: inner.event_generate('<<SelectAll>>'))
-        _show_menu = lambda e: menu.tk_popup(e.x_root, e.y_root)
-        w.bind('<Button-3>', _show_menu)
-        if platform.system() == 'Darwin':
-            # macOS: Control+click → Button-2; також підтримуємо Command-клавіші
-            w.bind('<Button-2>', _show_menu)
-
-        def _ctrl_any(event):
-            kc = event.keycode
-            if kc == 86:   # V — Paste
-                inner.event_generate('<<Paste>>');     return 'break'
-            if kc == 67:   # C — Copy
-                inner.event_generate('<<Copy>>');      return 'break'
-            if kc == 88:   # X — Cut
-                inner.event_generate('<<Cut>>');       return 'break'
-            if kc == 65:   # A — Select All
-                inner.event_generate('<<SelectAll>>'); return 'break'
-
-        inner.bind('<Control-KeyPress>', _ctrl_any, add=True)
-        if platform.system() == 'Darwin':
-            # macOS використовує Command замість Control для буфера
-            inner.bind('<Command-KeyPress>', _ctrl_any, add=True)
+        # Mac: правий клік — Button-2 (трекпад) та Button-3
+        w.bind('<Button-2>', lambda e: menu.tk_popup(e.x_root, e.y_root))
+        w.bind('<Button-3>', lambda e: menu.tk_popup(e.x_root, e.y_root))
+        # Mac: Command+ (основний спосіб)
+        w.bind('<Command-v>', lambda e: (inner.event_generate('<<Paste>>'),     'break')[1])
+        w.bind('<Command-c>', lambda e: (inner.event_generate('<<Copy>>'),      'break')[1])
+        w.bind('<Command-x>', lambda e: (inner.event_generate('<<Cut>>'),       'break')[1])
+        w.bind('<Command-a>', lambda e: (inner.event_generate('<<SelectAll>>'), 'break')[1])
+        # Control+ (на випадок підключеної Windows-клавіатури до Mac)
+        w.bind('<Control-v>', lambda e: (inner.event_generate('<<Paste>>'),     'break')[1])
+        w.bind('<Control-c>', lambda e: (inner.event_generate('<<Copy>>'),      'break')[1])
+        w.bind('<Control-x>', lambda e: (inner.event_generate('<<Cut>>'),       'break')[1])
+        w.bind('<Control-a>', lambda e: (inner.event_generate('<<SelectAll>>'), 'break')[1])
 
     def _edit(self, w, action):
         inner = w._entry if hasattr(w, '_entry') else w
         if action == 'paste':   inner.event_generate('<<Paste>>')
         elif action == 'copy':  inner.event_generate('<<Copy>>')
         elif action == 'cut':   inner.event_generate('<<Cut>>')
-
-
 
     # =========================================================================
     def set_status(self, ok):
@@ -380,50 +363,7 @@ class PhotoUploaderApp(ctk.CTk):
         n = len(self.photo_title_pairs)
         self._queue_count_lbl.configure(text=f'{n} файлів' if n else '')
 
-    def _auto_scan_if_ready(self):
-        a = self.entry_agency.get().strip()
-        s = self.entry_staff.get().strip()
-        p = self.entry_pass.get().strip()
-        w = self.entry_woman_id.get().strip()
-        if a and s and p and w:
-            self.log('Автозапуск сканування...')
-            self.fetch_albums_thread()
-
-    def toast(self, msg, color='#00C97A'):
-        t = tk.Toplevel(self)
-        t.overrideredirect(True)
-        t.attributes('-topmost', True)
-        t.attributes('-alpha', 0.92)
-        sw = self.winfo_screenwidth(); sh = self.winfo_screenheight()
-        w2 = 320; h2 = 48
-        t.geometry(f'{w2}x{h2}+{sw-w2-20}+{sh-h2-60}')
-        tk.Label(t, text=msg, bg=color, fg='white',
-                 font=('Segoe UI',12,'bold'), padx=20).pack(expand=True, fill='both')
-        t.after(3000, t.destroy)
-
-    # ── Album creation offer ─────────────────────────────────────────────────
-    def _offer_create_album(self, wid, mode):
-        d = ctk.CTkInputDialog(
-            text='Альбомів не знайдено. Введіть назву для створення першого:',
-            title='Створити альбом')
-        new_name = d.get_input()
-        if not new_name:
-            return
-        cs = {'Short Video':    'short_video_album_update.php',
-              'Private Photos': 'private_album_update.php',
-              'Mail Photos':    'album_update.php'}.get(mode, 'album_update.php')
-        try:
-            self.session.post(
-                f'https://www.charmdate.com/clagt/woman/{cs}',
-                data={'womanid': wid, 'update': 'createAlbum', 'albumid': 'A',
-                      'albumName': new_name, 'albumDesc': '', 'Submit': 'Confirm '},
-                verify=False, timeout=30)
-            self.log(f'→ Альбом "{new_name}" створено. Повторний скан...')
-            self.after(4000, self.fetch_albums_thread)
-        except Exception as e:
-            self.log(f'Помилка створення: {e}')
-
-    # ── Sound ─────────────────────────────────────────────────────────────────
+    # ── sound ─────────────────────────────────────────────────────────────────
     def _play_done_sound(self):
         if WINSOUND:
             try:
@@ -442,114 +382,6 @@ class PhotoUploaderApp(ctk.CTk):
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception:
                 pass
-
-    # ── Drag & Drop ──────────────────────────────────────────────────────────
-    def _setup_dnd(self, widget):
-        if not _DND_AVAILABLE:
-            return
-        try:
-            widget.drop_target_register(DND_FILES)
-            widget.dnd_bind('<<Drop>>', self._on_drop)
-        except Exception:
-            pass
-
-    def _on_drop(self, event):
-        raw = event.data
-        # Parse space-separated paths, handle {path with spaces}
-        paths = []
-        import shlex
-        try:
-            paths = shlex.split(raw.replace('\\', '/'))
-        except Exception:
-            paths = raw.split()
-        mode = self.mode_var.get()
-        video_ext = ('.mp4','.mov','.hevc','.mkv','.avi')
-        img_ext   = ('.jpg','.jpeg','.png','.heic','.heif')
-        accepted = 0
-        for p in paths:
-            p = p.strip('{}')
-            ext = os.path.splitext(p)[1].lower()
-            if mode == 'Short Video' and ext in video_ext:
-                self._add_queue_item(p); accepted += 1
-            elif mode != 'Short Video' and ext in img_ext:
-                self._add_queue_item(p); accepted += 1
-        if accepted:
-            self.update_queue_count()
-            self.scroll.update()
-            self.log(f'→ DnD: додано {accepted} файлів')
-
-    def clear_log(self):
-        self.log_box.configure(state='normal')
-        self.log_box.delete('1.0', 'end')
-        self.log_box.configure(state='disabled')
-
-    def save_log(self):
-        p = filedialog.asksaveasfilename(
-            defaultextension='.txt',
-            filetypes=[('Текст','*.txt')],
-            initialfile=f'log_{time.strftime("%Y%m%d_%H%M%S")}.txt')
-        if p:
-            with open(p, 'w', encoding='utf-8') as fout:
-                fout.write(self.log_box.get('1.0', 'end'))
-
-    def add_media(self):
-        self.stop_video()
-        mode = self.mode_var.get()
-        if mode == 'Short Video':
-            exts = [('Відео','*.mp4 *.mov *.hevc *.mkv *.avi')]
-        else:
-            h = ' *.heic *.heif' if HEIC_SUPPORTED else ''
-            exts = [('Зображення', ('*.jpg *.jpeg *.png' + h).strip())]
-        paths = filedialog.askopenfilenames(filetypes=exts)
-        if not paths:
-            return
-        for p in paths:
-            self._add_queue_item(p)
-        self.update_queue_count()
-        self.scroll.update()
-
-    def _add_queue_item(self, p):
-        f = ctk.CTkFrame(self.scroll, fg_color='#181818',
-                         corner_radius=8, border_width=1, border_color='#222')
-        f.pack(fill='x', pady=3, padx=5)
-        il = tk.Label(f, bg='#181818', width=80, height=80)
-        il.pack(side='left', padx=10, pady=5)
-        pi = self.generate_preview(p)
-        if pi:
-            ti = ImageTk.PhotoImage(pi)
-            self.image_refs.append(ti)
-            il.configure(image=ti)
-        ctrl = ctk.CTkFrame(f, fg_color='transparent')
-        ctrl.pack(side='left', padx=5)
-        if str(p).lower().endswith(('.mp4','.mov','.hevc','.mkv','.avi')):
-            ctk.CTkButton(ctrl, text='PLAY', width=45, height=22,
-                          font=('Segoe UI Bold',9),
-                          fg_color=self.COLOR_ACCENT,
-                          hover_color=self.COLOR_ACCENT_HOVER,
-                          command=lambda pp=p, ll=il:
-                              self.play_video_inline(pp, ll)).pack(pady=2)
-        status_lbl = tk.Label(ctrl, text='', bg='#181818',
-                              font=('Segoe UI',14), width=2)
-        status_lbl.pack()
-        item = {'path': p, 'entry': None, 'status_lbl': status_lbl, 'frame': f}
-        tk.Button(f, text='✕', bg='#181818', fg='#555', relief='flat',
-                  font=('Segoe UI',11), cursor='hand2', bd=0,
-                  activebackground='#181818', activeforeground='#FF1060',
-                  command=lambda fr=f, it=item: self._remove_queue_item(fr, it)
-                  ).pack(side='right', padx=6)
-        e = ctk.CTkEntry(f, font=('Segoe UI Semibold',13),
-                         border_width=0, fg_color='#0D0D0D', height=38,
-                         placeholder_text='Ввести назву...')
-        e.pack(side='right', padx=(0,6), pady=10, fill='x', expand=True)
-        self._bind_clipboard(e)
-        item['entry'] = e
-        self.photo_title_pairs.append(item)
-
-    def _remove_queue_item(self, frame, item):
-        if item in self.photo_title_pairs:
-            self.photo_title_pairs.remove(item)
-        frame.destroy()
-        self.update_queue_count()
 
     # ── config ───────────────────────────────────────────────────────────────
     def load_config(self):
@@ -606,29 +438,34 @@ class PhotoUploaderApp(ctk.CTk):
 
     # ── ffmpeg ───────────────────────────────────────────────────────────────
     def _get_ffmpeg(self):
-        # Підтримка Windows (.exe) та macOS/Linux (без розширення)
-        names = ['ffmpeg', 'ffmpeg.exe']
-        for d in [_BIN_DIR, APP_DIR]:
-            for n in names:
-                c = os.path.join(d, n)
-                if os.path.exists(c):
-                    return c
+        # FIX MAC: перевіряємо всі можливі місця всередині .app bundle
+        candidates = [os.path.join(_BIN_DIR, 'ffmpeg'),
+                      os.path.join(APP_DIR, 'ffmpeg')]
+        if getattr(sys, 'frozen', False):
+            _exe = os.path.dirname(sys.executable)
+            candidates += [
+                os.path.join(_exe, 'bin', 'ffmpeg'),
+                os.path.normpath(os.path.join(_exe, '..', 'Resources', 'bin', 'ffmpeg')),
+            ]
+        for c in candidates:
+            if os.path.exists(c):
+                return c
         return 'ffmpeg'
 
     def _get_ffprobe(self):
-        names = ['ffprobe', 'ffprobe.exe']
-        for d in [_BIN_DIR, APP_DIR]:
-            for n in names:
-                c = os.path.join(d, n)
-                if os.path.exists(c):
-                    return c
-        return 'ffprobe'
+        # FIX: не використовуємо replace щоб не зламати шлях де є 'ffmpeg' в назві папки
+        ff = self._get_ffmpeg()
+        fp = os.path.join(os.path.dirname(ff), 'ffprobe')
+        return fp if os.path.exists(fp) else 'ffprobe'
 
     def _detect_hw_encoder(self, ff):
-        encs = [('h264_videotoolbox', ['-allow_sw', '1']),  # macOS (Apple Silicon + Intel)
-                ('h264_nvenc',        ['-preset','p1','-tune','ll']),
-                ('h264_amf',          ['-quality','speed']),
-                ('h264_qsv',          ['-preset','veryfast'])]
+        # FIX MAC: VideoToolbox — нативний Apple GPU encoder (M1/M2/Intel Mac)
+        if platform.system() == 'Darwin':
+            encs = [('h264_videotoolbox', ['-realtime', 'true'])]
+        else:
+            encs = [('h264_nvenc',['-preset','p1','-tune','ll']),
+                    ('h264_amf',['-quality','speed']),
+                    ('h264_qsv',['-preset','veryfast'])]
         for enc, args in encs:
             try:
                 r = subprocess.run(
@@ -773,7 +610,7 @@ class PhotoUploaderApp(ctk.CTk):
         self.log(f'Ціль: {self.selected_album_id}')
 
     # =========================================================================
-    # FIX: fetch_albums — robust Mail Photos album count parsing
+    # FETCH ALBUMS
     # =========================================================================
     def fetch_albums_thread(self):
         self.save_config()
@@ -833,22 +670,12 @@ class PhotoUploaderApp(ctk.CTk):
             self.album_counts = {}
             self.album_names  = {}
 
-            # =================================================================
-            # UNIFIED tile parser — works for ALL modes.
-            # All three list pages use <table width="150"> album tiles:
-            #   • <a href="...?albumid=XXXX&...">          → albumid
-            #   • <td class="albumfont">Name</td>          → album name
-            #   • "N photo(s)" or "N videos" in tile text  → count
-            #
-            # We skip tiles that have &flag= in the link (pending approval).
-            # =================================================================
             seen_aids = set()
             for tbl in soup_li.find_all('table', width='150'):
                 link = tbl.find('a', href=re.compile(r'albumid='))
                 if not link:
                     continue
                 href = link.get('href', '')
-                # Skip "pending approval" tiles (flag=2 etc.)
                 if 'flag=' in href and 'flag=&' not in href and not href.endswith('flag='):
                     continue
                 m = re.search(r'albumid=([A-Z0-9]+)', href)
@@ -859,7 +686,6 @@ class PhotoUploaderApp(ctk.CTk):
                     continue
                 seen_aids.add(aid)
 
-                # ── album name ────────────────────────────────────────────────
                 name_td = tbl.find('td', class_='albumfont')
                 if name_td:
                     pn = name_td.get_text(strip=True)
@@ -868,7 +694,6 @@ class PhotoUploaderApp(ctk.CTk):
                     pn = first_h40.get_text(strip=True) if first_h40 else ''
                 pn = pn or f'Album-{aid}'
 
-                # ── count: "N photo(s)" OR "N videos" ────────────────────────
                 cnt = 0
                 txt = tbl.get_text(' ', strip=True)
                 cm = re.search(r'(\d+)\s*(?:photo(?:\(s\)|s)?|videos?)', txt, re.IGNORECASE)
@@ -883,14 +708,11 @@ class PhotoUploaderApp(ctk.CTk):
                 album_list.append(disp)
                 self.log(f'→ Альбом: {pn} [{aid}] = {cnt} {unit}')
 
-            # Fallback to <select> if tile parsing found nothing
             if len(album_list) == 1:
                 self.log('Тайли не знайдено, пробую select...')
                 sel = soup_up.find('select', {'name': 'albumid'}) or soup_up.find('select')
                 if not sel:
                     self.log('Список альбомів не знайдено.')
-                    # Offer to create first album immediately
-                    self.after(0, lambda: self._offer_create_album(wid, mode))
                     self.btn_fetch.configure(state='normal', text='СКАН')
                     return False
                 for opt in sel.find_all('option'):
@@ -911,33 +733,14 @@ class PhotoUploaderApp(ctk.CTk):
                             if cm:
                                 cnt = int(cm.group(1))
                                 break
-
                     disp = f'{pn} ({cnt}/30)'
                     self.available_albums[disp] = aid
                     self.album_counts[aid]       = cnt
                     self.album_names[aid]        = pn
                     album_list.append(disp)
 
-            # If still no albums found at all — offer to create one
-            if len(album_list) == 1:
-                self.log('Альбомів немає. Пропоную створити...')
-                self.after(0, lambda: self._offer_create_album(wid, mode))
-                self.btn_fetch.configure(state='normal', text='СКАН')
-                return False
-
             self.album_dropdown.configure(values=album_list)
-            # Auto-select best album: prefer partially filled (>0 and <30)
-            best_disp = album_list[0]
-            best_cnt  = -1
-            for disp, aid2 in self.available_albums.items():
-                if aid2 == 'NEW':
-                    continue
-                c2 = self.album_counts.get(aid2, 0)
-                if c2 < 30 and c2 > best_cnt:
-                    best_cnt  = c2
-                    best_disp = disp
-            self.album_var.set(best_disp)
-            self.selected_album_id = self.available_albums.get(best_disp, 'NEW')
+            self.album_var.set(album_list[0])
             self.btn_start.configure(state='normal')
             self.btn_fetch.configure(state='normal', text='СКАН')
             self.after(0, lambda: self.set_status(True))
@@ -963,13 +766,39 @@ class PhotoUploaderApp(ctk.CTk):
         paths = filedialog.askopenfilenames(filetypes=exts)
         if not paths:
             return
-        # Clear existing queue
+
         for w in self.scroll.winfo_children():
             w.destroy()
         self.photo_title_pairs.clear()
         self.image_refs.clear()
+
         for p in paths:
-            self._add_queue_item(p)
+            f = ctk.CTkFrame(self.scroll, fg_color='#181818',
+                             corner_radius=8, border_width=1, border_color='#222')
+            f.pack(fill='x', pady=3, padx=5)
+            il = tk.Label(f, bg='#181818', width=80, height=80)
+            il.pack(side='left', padx=10, pady=5)
+            pi = self.generate_preview(p)
+            if pi:
+                ti = ImageTk.PhotoImage(pi)
+                self.image_refs.append(ti)
+                il.configure(image=ti)
+            ctrl = ctk.CTkFrame(f, fg_color='transparent')
+            ctrl.pack(side='left', padx=5)
+            if str(p).lower().endswith(('.mp4','.mov','.hevc','.mkv','.avi')):
+                ctk.CTkButton(ctrl, text='PLAY', width=45, height=22,
+                              font=('Segoe UI Bold',9),
+                              fg_color=self.COLOR_ACCENT,
+                              hover_color=self.COLOR_ACCENT_HOVER,
+                              command=lambda pp=p, ll=il:
+                                  self.play_video_inline(pp, ll)).pack(pady=2)
+            e = ctk.CTkEntry(f, font=('Segoe UI Semibold',13),
+                             border_width=0, fg_color='#0D0D0D', height=38,
+                             placeholder_text='Ввести назву...')
+            e.pack(side='right', padx=15, pady=10, fill='x', expand=True)
+            self._bind_clipboard(e)
+            self.photo_title_pairs.append({'path': p, 'entry': e})
+
         self.update_queue_count()
         self.scroll.update()
 
@@ -1004,15 +833,16 @@ class PhotoUploaderApp(ctk.CTk):
         if status_code == 302:
             return True
         t = text.lower()
-        # explicit success markers
         for marker in ('successful','success','upload ok','uploadok','上传成功'):
             if marker in t:
                 return True
-        # Mail Photos success: server redirects to Lady Profile page
         if 'lady profile' in t or 'lady_profile' in t:
             return True
-        # Private Photos success: same profile page pattern
         if '<title>lady' in t:
+            return True
+        if '<title></title>' in t and 'font-family' in t:
+            return True
+        if status_code == 200 and 'font-family: "arial"' in t and 'error' not in t and 'fail' not in t:
             return True
         return False
 
@@ -1045,7 +875,7 @@ class PhotoUploaderApp(ctk.CTk):
         if file_kb < 100:
             img.save(TEMP_IMAGE, 'JPEG', quality=99)
             file_kb = os.path.getsize(TEMP_IMAGE) // 1024
-            self.log(f'→ Temp збережено: {file_kb}KB')
+        self.log(f'→ Temp збережено: {file_kb}KB')
         if not (100 <= file_kb <= 5000):
             self.log(f'Розмір {file_kb}KB поза межами 100KB-5MB!')
             return False
@@ -1089,23 +919,6 @@ class PhotoUploaderApp(ctk.CTk):
             success = False
 
             if mode == 'Short Video':
-                # === REFRESH TOKEN перед кожним відео ===
-                self.log('→ Оновлення токена...')
-                try:
-                    _upu = f'https://www.charmdate.com/clagt/woman/short_video_upload.php?womanid={wid}'
-                    _rup = self.session.get(_upu, verify=False, timeout=15)
-                    _vk  = re.search(r'videoKey["\']?\s*[:=]\s*["\']?([a-fA-F0-9]{32})', _rup.text)
-                    _ut  = re.search(r'uploadToken["\']?\s*[:=]\s*["\']?([a-fA-F0-9]{32})', _rup.text)
-                    if not _ut:
-                        _ut = re.search(r'uploadToken.*?value=["\'](.*?)(?=["\'])', _rup.text)
-                    if _vk: self.video_key    = _vk.group(1)
-                    if _ut: self.upload_token = _ut.group(1)
-                    self.log(f'→ Token: ...{self.upload_token[-8:] if self.upload_token else "НЕ ЗНАЙДЕНО"}')
-                    self.session.headers.update({'Referer': _upu})
-                except Exception as _e:
-                    self.log(f'→ Не вдалось оновити токен: {_e}')
-                # ========================================
-
                 if not self.upload_token:
                     self.log('Токен відсутній.'); break
                 v_f, t_f = self.process_video_dan(item['path'])
@@ -1117,67 +930,32 @@ class PhotoUploaderApp(ctk.CTk):
                         'agentid':self.entry_agency.get().strip(),
                         'siteid':'4','num':'1','videoKey':self.video_key,
                         'serverType':'0','uploadToken':self.upload_token}
-                CHUNK_SIZE = 2 * 1024 * 1024  # 2MB chunks
-                PARALLEL   = 6
-                chunks     = (v_s + CHUNK_SIZE - 1) // CHUNK_SIZE
+                chunks     = (v_s // 2048000) + 1
                 fid        = ''
                 upload_ok  = True
-                _upload_url = base64.b64decode(
-                    b'aHR0cHM6Ly9pbS5lc2gtY29ycC5jb20vRmlsZVVwbG9hZC9maWxldXBsb2FkZXIucGhwP2FjdD11cGxvYWQ='
-                ).decode()
-                self.log(f'→ Чанків: {chunks} ({v_s//1024}KB, паралельно: {PARALLEL})')
+                self.log(f'→ Чанків: {chunks} ({v_s//1024}KB)')
 
-                # Pre-read all chunks into memory to avoid file seek races
-                _chunks_data = []
-                with open(v_f, 'rb') as _f:
-                    for c in range(chunks):
-                        _f.seek(c * CHUNK_SIZE)
-                        _chunks_data.append(_f.read(min(CHUNK_SIZE, v_s - c * CHUNK_SIZE)))
-
-                # Build a proper session copy per thread (shares cookies snapshot)
-                def _make_sess():
-                    s = requests.Session()
-                    s.headers.update(dict(self.session.headers))
-                    s.cookies.update(requests.utils.dict_from_cookiejar(self.session.cookies))
-                    s.verify = False
-                    return s
-
-                _fid_lock = threading.Lock()
-
-                def upload_chunk(c):
-                    sess = _make_sess()
-                    for _retry in range(3):
-                        if _retry > 0:
-                            time.sleep(5 * _retry)
-                        try:
-                            res = sess.post(
-                                _upload_url,
-                                files={'filedata': ('v.mp4', _chunks_data[c], 'application/octet-stream')},
-                                data={'filename': 'v.mp4', 'trunkIndex': str(c),
-                                      'uploadInfo': json.dumps(info, separators=(',', ':'))},
-                                timeout=120)
-                            rj = res.json()
-                            if rj.get('errno') == 200:
-                                with _fid_lock:
-                                    nonlocal fid
-                                    if rj.get('final_file'):
-                                        fid = rj['final_file']
-                                self.log(f'→ Чанк {c+1}/{chunks}: OK')
-                                return True
-                            else:
-                                self.log(f'→ Чанк {c+1} errno={rj.get("errno")}, повтор...')
-                        except Exception as e:
-                            self.log(f'→ Чанк {c+1} помилка (спроба {_retry+1}/3): {e}')
-                    self.log(f'[!] Чанк {c+1} не завантажено після 3 спроб')
-                    return False
-
-                with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
-                    futures = {pool.submit(upload_chunk, c): c for c in range(chunks)}
-                    for fut in as_completed(futures):
-                        if not fut.result():
-                            upload_ok = False
-                            pool.shutdown(wait=False, cancel_futures=True)
-                            break
+                for c in range(chunks):
+                    start = c * 2048000; end = min(v_s, start + 2048000)
+                    with open(v_f,'rb') as f:
+                        f.seek(start); chunk = f.read(end - start)
+                    self.log(f'→ Чанк {c+1}/{chunks}...')
+                    try:
+                        res = self.session.post(
+                            base64.b64decode(
+                                b'aHR0cHM6Ly9pbS5lc2gtY29ycC5jb20vRmlsZVVwbG9hZC9maWxldXBsb2FkZXIucGhwP2FjdD11cGxvYWQ='
+                            ).decode(),
+                            files={'filedata':('v.mp4',chunk,'application/octet-stream')},
+                            data={'filename':'v.mp4','trunkIndex':str(c),
+                                  'uploadInfo':json.dumps(info, separators=(',',':'))},
+                            verify=False, timeout=60)
+                        rj = res.json()
+                        self.log(f'→ Чанк {c+1}: errno={rj.get("errno")}')
+                        if rj.get('errno') == 200:
+                            fid = rj.get('final_file', fid)
+                    except Exception as e:
+                        self.log(f'Помилка чанку {c+1}: {e}')
+                        upload_ok = False; break
 
                 if not upload_ok:
                     try: os.remove(v_f); os.remove(t_f)
@@ -1224,24 +1002,10 @@ class PhotoUploaderApp(ctk.CTk):
                             self.log(f'Помилка реєстрації: {e}')
                 else:
                     self.log(f'final_fid порожній! jr={jr}')
-                try: os.remove(v_f); os.remove(t_f)   # temp video/thumb — завжди видаляємо
+                try: os.remove(v_f); os.remove(t_f)
                 except: pass
 
             else:
-                # PHOTOS (Mail Photos + Private Photos)
-                # === REFRESH REFERER перед кожним фото ===
-                try:
-                    _up_map = {
-                        'Mail Photos':    'women_album_upload',
-                        'Private Photos': 'private_photo_upload',
-                    }
-                    _upu = f'https://www.charmdate.com/clagt/woman/{_up_map[mode]}.php?womanid={wid}'
-                    self.session.get(_upu, verify=False, timeout=15)
-                    self.session.headers.update({'Referer': _upu})
-                except Exception as _e:
-                    self.log(f'→ Referer не оновлено: {_e}')
-                # =========================================
-
                 try:
                     ok = self._prepare_photo(item['path'])
                 except Exception as e:
@@ -1259,7 +1023,6 @@ class PhotoUploaderApp(ctk.CTk):
                 self.log(f'→ Таймаут: {upload_timeout}с')
 
                 with open(TEMP_IMAGE,'rb') as fh:
-                    # зберігаємо пробіли та Unicode-букви, прибираємо лише спецсимволи
                     cl = re.sub(r'[^\w\s]', '', item['entry'].get() or 'Photo', flags=re.UNICODE).strip()[:30]
                     p  = [('womanid',(None,wid)),('albumid',(None,aid)),
                           ('photoIndex',(None,'5')),('actionto',(None,'onlyUpload')),
@@ -1284,7 +1047,6 @@ class PhotoUploaderApp(ctk.CTk):
                     except Exception as e:
                         self.log(f'Помилка завантаження: {e}')
 
-                # TEMP_IMAGE — завжди видаляємо після спроби (успіх чи ні)
                 try: os.remove(TEMP_IMAGE)
                 except: pass
 
@@ -1294,30 +1056,17 @@ class PhotoUploaderApp(ctk.CTk):
                 self.after(0, lambda d=f"{self.album_names[aid]} ({cnt}/30)":
                                self.album_var.set(d))
                 self.log(f'УСПІХ ({cnt}/30)')
-                if item.get('status_lbl'):
-                    self.after(0, lambda lbl=item['status_lbl']: (
-                        lbl.configure(text='✓', fg='#00C97A')))
                 try: os.remove(item['path'])
                 except: pass
             else:
                 self.log(f'[!] ПОМИЛКА {i+1}')
-                if item.get('status_lbl'):
-                    self.after(0, lambda lbl=item['status_lbl']: (
-                        lbl.configure(text='✗', fg='#FF1060')))
 
             self.after(0, lambda done=i+1, total=len(tasks):
                            self.set_progress(done, total))
             time.sleep(1)
 
-        ok_count  = sum(1 for it in tasks if it.get('status_lbl') and it['status_lbl'].cget('text') == '✓')
-        err_count = sum(1 for it in tasks if it.get('status_lbl') and it['status_lbl'].cget('text') == '✗')
-        self.log(f'ГОТОВО. Успіх: {ok_count}, Помилки: {err_count}')
-        msg = f'✓ {ok_count} завантажено'
-        if err_count:
-            msg += f'  ✗ {err_count} помилок'
-        clr = '#00C97A' if not err_count else '#D06000'
-        self.after(0, lambda: self.toast(msg, clr))
-        self.after(0, self._play_done_sound)
+        self.log('ГОТОВО.')
+        self._play_done_sound()
         self.btn_start.configure(state='normal')
         self.btn_stop.configure(state='disabled')
 
