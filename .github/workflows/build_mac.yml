@@ -61,14 +61,22 @@ jobs:
 
       - name: Create launcher script
         run: |
-          cat > "dist/Запустити_Mac.command" << 'LAUNCHER'
-          #!/bin/bash
-          DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-          APP="$DIR/CharmDateBot.app"
-          xattr -rd com.apple.quarantine "$APP" 2>/dev/null || \
-            sudo xattr -rd com.apple.quarantine "$APP" 2>/dev/null || true
-          open "$APP"
-          LAUNCHER
+          cat > "dist/Запустити_Mac.command" << 'EOF'
+#!/bin/bash
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+SCRIPT="$DIR/Запустити_Mac.command"
+APP="$DIR/CharmDateBot.app"
+echo "================================================"
+echo "   CharmDate Media Bot - First Launch Fix"
+echo "================================================"
+echo ""
+echo "Знімаємо блокування macOS..."
+xattr -rd com.apple.quarantine "$SCRIPT" 2>/dev/null || true
+xattr -rd com.apple.quarantine "$APP" 2>/dev/null || \
+  sudo xattr -rd com.apple.quarantine "$APP" 2>/dev/null || true
+echo "Запускаємо..."
+open "$APP"
+EOF
           chmod +x "dist/Запустити_Mac.command"
 
       - name: Package ZIP
@@ -142,14 +150,22 @@ jobs:
 
       - name: Create launcher script
         run: |
-          cat > "dist/Запустити_Mac.command" << 'LAUNCHER'
-          #!/bin/bash
-          DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-          APP="$DIR/CharmDateBot.app"
-          xattr -rd com.apple.quarantine "$APP" 2>/dev/null || \
-            sudo xattr -rd com.apple.quarantine "$APP" 2>/dev/null || true
-          open "$APP"
-          LAUNCHER
+          cat > "dist/Запустити_Mac.command" << 'EOF'
+#!/bin/bash
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+SCRIPT="$DIR/Запустити_Mac.command"
+APP="$DIR/CharmDateBot.app"
+echo "================================================"
+echo "   CharmDate Media Bot - First Launch Fix"
+echo "================================================"
+echo ""
+echo "Знімаємо блокування macOS..."
+xattr -rd com.apple.quarantine "$SCRIPT" 2>/dev/null || true
+xattr -rd com.apple.quarantine "$APP" 2>/dev/null || \
+  sudo xattr -rd com.apple.quarantine "$APP" 2>/dev/null || true
+echo "Запускаємо..."
+open "$APP"
+EOF
           chmod +x "dist/Запустити_Mac.command"
 
       - name: Package ZIP
