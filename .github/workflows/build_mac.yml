@@ -41,7 +41,6 @@ jobs:
           cp "$(which ffmpeg)"  bin/ffmpeg
           cp "$(which ffprobe)" bin/ffprobe
           chmod +x bin/ffmpeg bin/ffprobe
-          echo "=== FFmpeg архітектура ==="
           file bin/ffmpeg
 
       - name: Build ARM64 App
@@ -61,22 +60,17 @@ jobs:
 
       - name: Create launcher script
         run: |
-          cat > "dist/Запустити_Mac.command" << 'EOF'
-#!/bin/bash
-DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-SCRIPT="$DIR/Запустити_Mac.command"
-APP="$DIR/CharmDateBot.app"
-echo "================================================"
-echo "   CharmDate Media Bot - First Launch Fix"
-echo "================================================"
-echo ""
-echo "Знімаємо блокування macOS..."
-xattr -rd com.apple.quarantine "$SCRIPT" 2>/dev/null || true
-xattr -rd com.apple.quarantine "$APP" 2>/dev/null || \
-  sudo xattr -rd com.apple.quarantine "$APP" 2>/dev/null || true
-echo "Запускаємо..."
-open "$APP"
-EOF
+          python3 -c "
+          content = '''#!/bin/bash
+          DIR=\"\$( cd \"\$( dirname \"\${BASH_SOURCE[0]}\" )\" && pwd )\"
+          APP=\"\$DIR/CharmDateBot.app\"
+          xattr -rd com.apple.quarantine \"\$DIR/Запустити_Mac.command\" 2>/dev/null || true
+          xattr -rd com.apple.quarantine \"\$APP\" 2>/dev/null || sudo xattr -rd com.apple.quarantine \"\$APP\" 2>/dev/null || true
+          open \"\$APP\"
+          '''
+          with open('dist/Запустити_Mac.command', 'w') as f:
+              f.write(content.replace('          ', ''))
+          "
           chmod +x "dist/Запустити_Mac.command"
 
       - name: Package ZIP
@@ -130,7 +124,6 @@ EOF
           curl -L "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o ffprobe.zip
           unzip -o ffprobe.zip -d bin
           chmod +x bin/ffmpeg bin/ffprobe
-          echo "=== FFmpeg архітектура ==="
           file bin/ffmpeg
 
       - name: Build Intel App
@@ -150,22 +143,17 @@ EOF
 
       - name: Create launcher script
         run: |
-          cat > "dist/Запустити_Mac.command" << 'EOF'
-#!/bin/bash
-DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-SCRIPT="$DIR/Запустити_Mac.command"
-APP="$DIR/CharmDateBot.app"
-echo "================================================"
-echo "   CharmDate Media Bot - First Launch Fix"
-echo "================================================"
-echo ""
-echo "Знімаємо блокування macOS..."
-xattr -rd com.apple.quarantine "$SCRIPT" 2>/dev/null || true
-xattr -rd com.apple.quarantine "$APP" 2>/dev/null || \
-  sudo xattr -rd com.apple.quarantine "$APP" 2>/dev/null || true
-echo "Запускаємо..."
-open "$APP"
-EOF
+          python3 -c "
+          content = '''#!/bin/bash
+          DIR=\"\$( cd \"\$( dirname \"\${BASH_SOURCE[0]}\" )\" && pwd )\"
+          APP=\"\$DIR/CharmDateBot.app\"
+          xattr -rd com.apple.quarantine \"\$DIR/Запустити_Mac.command\" 2>/dev/null || true
+          xattr -rd com.apple.quarantine \"\$APP\" 2>/dev/null || sudo xattr -rd com.apple.quarantine \"\$APP\" 2>/dev/null || true
+          open \"\$APP\"
+          '''
+          with open('dist/Запустити_Mac.command', 'w') as f:
+              f.write(content.replace('          ', ''))
+          "
           chmod +x "dist/Запустити_Mac.command"
 
       - name: Package ZIP
