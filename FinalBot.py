@@ -26,6 +26,13 @@ try:
 except ImportError:
     HEIC_SUPPORTED = False
 
+# ==================== ПЕРЕКЛАДАЧ (опціонально) ====================
+try:
+    from deep_translator import GoogleTranslator
+    TRANSLATOR_AVAILABLE = True
+except ImportError:
+    TRANSLATOR_AVAILABLE = False
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- ГЛОБАЛЬНІ ШЛЯХИ (Mac .app bundle aware) ---
@@ -279,6 +286,16 @@ class PhotoUploaderApp(ctk.CTk):
             border_color=C['border2'], corner_radius=4,
             checkbox_width=20, checkbox_height=20)
         self.strip_ai_chk.pack(side='left')
+
+        self.translate_var = tk.BooleanVar(value=False)
+        self.translate_chk = ctk.CTkCheckBox(
+            ai_row, text='🌐 Авто-переклад назв → EN',
+            variable=self.translate_var,
+            fg_color=C['accent'], hover_color=C['accent2'],
+            text_color=C['mid'], font=('Segoe UI',10),
+            border_color=C['border2'], corner_radius=4,
+            checkbox_width=20, checkbox_height=20)
+        self.translate_chk.pack(side='left', padx=(16,0))
         # ── Progress bar with counter ──
         prog_row = tk.Frame(right, bg=C['bg'])
         prog_row.pack(fill='x', pady=(0,6))
@@ -603,6 +620,7 @@ class PhotoUploaderApp(ctk.CTk):
             self.profiles = data.get('profiles', {'Default':{'a':'','s':'','p':'','w':''}})
             self.current_profile_name = data.get('last_profile','Default')
             self.strip_ai_var.set(data.get('strip_ai', False))
+            self.translate_var.set(data.get('translate', False))
         except:
             self.profiles = {'Default':{'a':'','s':'','p':'','w':''}}
         self._refresh_profile_ui()
@@ -617,7 +635,8 @@ class PhotoUploaderApp(ctk.CTk):
         with open(CONFIG_FILE,'w') as f:
             json.dump({'profiles':self.profiles,
                        'last_profile':self.current_profile_name,
-                       'strip_ai':self.strip_ai_var.get()}, f)
+                       'strip_ai':self.strip_ai_var.get(),
+                       'translate':self.translate_var.get()}, f)
 
     def _refresh_profile_ui(self):
         self.profile_menu.configure(values=list(self.profiles.keys()))
@@ -1054,6 +1073,37 @@ class PhotoUploaderApp(ctk.CTk):
     def stop(self):
         self.is_running = False
 
+    def _translate_to_en(self, text):
+        """Перекладає текст на англійську. Кеш + м'який fallback на оригінал."""
+        text = (text or '').strip()
+        if not text:
+            return text
+        # якщо переклад вимкнено — повертаємо як є
+        if not self.translate_var.get():
+            return text
+        # якщо бібліотека не встановлена
+        if not TRANSLATOR_AVAILABLE:
+            self.log('→ Переклад недоступний (pip install deep-translator)')
+            return text
+        # якщо текст вже латиницею (ASCII) — не перекладаємо
+        if all(ord(c) < 128 for c in text):
+            return text
+        # кеш
+        if not hasattr(self, '_tr_cache'):
+            self._tr_cache = {}
+        if text in self._tr_cache:
+            return self._tr_cache[text]
+        try:
+            result = GoogleTranslator(source='auto', target='en').translate(text)
+            result = (result or text).strip()
+            self._tr_cache[text] = result
+            self.log(f'→ Переклад: "{text}" → "{result}"')
+            return result
+        except Exception as e:
+            self.log(f'→ Помилка перекладу ({e}), залишаю оригінал')
+            self._tr_cache[text] = text
+            return text
+
     def _extract_html_body_text(self, text):
         """Витягує видимий текст з <body>, обрізає CSS/скрипти."""
         try:
@@ -1340,7 +1390,7 @@ class PhotoUploaderApp(ctk.CTk):
                               ('hidFileMd5ID',(None,jr.get('file_md5',v_m))),
                               ('hidVideoKey',(None,self.video_key)),
                               ('womanid',(None,wid)),('albumid',(None,aid)),
-                              ('short_video_desc',(None,item['entry'].get() or 'Beauty')),
+                              ('short_video_desc',(None,self._translate_to_en(item['entry'].get()) or 'Beauty')),
                               ('short_video_img',('t.jpg',ft,'image/jpeg')),
                               ('photoIndex',(None,'5')),('actionto',(None,'onlyUpload')),
                               ('update',(None,'uploadPhoto')),('Submit',(None,' Upload '))]
@@ -1391,8 +1441,9 @@ class PhotoUploaderApp(ctk.CTk):
                 self.log(f'→ Таймаут: {upload_timeout}с')
 
                 with open(TEMP_IMAGE,'rb') as fh:
-                    # зберігаємо пробіли та Unicode-букви, прибираємо лише спецсимволи
-                    cl = re.sub(r'[^\w\s]', '', item['entry'].get() or 'Photo', flags=re.UNICODE).strip()[:30]
+                    # спочатку переклад (якщо увімкнено), потім прибираємо спецсимволи
+                    raw_caption = self._translate_to_en(item['entry'].get()) or 'Photo'
+                    cl = re.sub(r'[^\w\s]', '', raw_caption, flags=re.UNICODE).strip()[:30]
                     p  = [('womanid',(None,wid)),('albumid',(None,aid)),
                           ('photoIndex',(None,'5')),('actionto',(None,'onlyUpload')),
                           ('photo1',(os.path.basename(item['path']),fh,'image/jpeg')),
