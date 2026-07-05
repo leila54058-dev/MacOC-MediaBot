@@ -29,7 +29,8 @@ jobs:
                       opencv-python-headless \
                       pillow \
                       pillow-heif \
-                      urllib3
+                      urllib3 \
+                      numpy
 
       - name: Download ARM64 FFmpeg & FFprobe
         run: |
@@ -46,7 +47,9 @@ jobs:
             --name "CharmDateBot" \
             --add-data "bin:bin" \
             --hidden-import PIL.ImageTk \
+            --hidden-import PIL.ImageFilter \
             --hidden-import cv2 \
+            --hidden-import numpy \
             --hidden-import pillow_heif \
             --hidden-import bs4 \
             --hidden-import urllib3 \
