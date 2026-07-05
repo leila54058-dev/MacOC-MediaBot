@@ -30,7 +30,8 @@ jobs:
                       pillow \
                       pillow-heif \
                       urllib3 \
-                      numpy
+                      numpy \
+                      deep-translator
 
       - name: Download ARM64 FFmpeg & FFprobe
         run: |
@@ -54,8 +55,10 @@ jobs:
             --hidden-import bs4 \
             --hidden-import urllib3 \
             --hidden-import requests \
+            --hidden-import deep_translator \
             --collect-all customtkinter \
             --collect-all pillow_heif \
+            --collect-all deep_translator \
             FinalBot.py
 
       - name: Create launcher script
