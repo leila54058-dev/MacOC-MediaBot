@@ -3,17 +3,20 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog
 import requests
-import os, re, base64, hashlib, time, threading, json, subprocess, sys, platform, tempfile
+import os, re, base64, hashlib, time, threading, json, subprocess, sys, platform, random, tempfile
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 try:
     import winsound
     WINSOUND = True
 except ImportError:
     WINSOUND = False
+
 from bs4 import BeautifulSoup
 import cv2
 import urllib3
-from PIL import Image, ImageOps, ImageTk
+from PIL import Image, ImageOps, ImageTk, ImageFilter
+import math
 
 # ==================== HEIC ПІДТРИМКА ====================
 try:
@@ -141,7 +144,10 @@ class PhotoUploaderApp(ctk.CTk):
         self._C = C
         self.configure(fg_color=C['bg'])
         self.title('CharmDate Media Center v99.0')
-        self.geometry('960x720')
+        if platform.system() == 'Darwin':
+            self.geometry('1100x820')
+        else:
+            self.geometry('960x720')
         self.resizable(True, True)
 
         # ── top bar ──
@@ -261,7 +267,18 @@ class PhotoUploaderApp(ctk.CTk):
         for b in (self.btn_fetch, self.btn_select, self.btn_add, self.btn_titles):
             b.pack(side='left', fill='x', expand=True, padx=2)
 
-        # ── Global title row ──
+        # ── AI strip toggle ──
+        ai_row = tk.Frame(right, bg=C['bg'])
+        ai_row.pack(fill='x', pady=(4,2))
+        self.strip_ai_var = tk.BooleanVar(value=False)
+        self.strip_ai_chk = ctk.CTkCheckBox(
+            ai_row, text='🧹 Стерти ІІ сліди (метадані + шум)',
+            variable=self.strip_ai_var,
+            fg_color=C['accent'], hover_color=C['accent2'],
+            text_color=C['mid'], font=('Segoe UI',10),
+            border_color=C['border2'], corner_radius=4,
+            checkbox_width=20, checkbox_height=20)
+        self.strip_ai_chk.pack(side='left')
         # ── Progress bar with counter ──
         prog_row = tk.Frame(right, bg=C['bg'])
         prog_row.pack(fill='x', pady=(0,6))
@@ -369,10 +386,14 @@ class PhotoUploaderApp(ctk.CTk):
 
         def _ctrl_any(event):
             kc = event.keycode
-            if kc == 86:   inner.event_generate('<<Paste>>');     return 'break'
-            if kc == 67:   inner.event_generate('<<Copy>>');      return 'break'
-            if kc == 88:   inner.event_generate('<<Cut>>');       return 'break'
-            if kc == 65:   inner.event_generate('<<SelectAll>>'); return 'break'
+            if kc == 86:   # V — Paste
+                inner.event_generate('<<Paste>>');     return 'break'
+            if kc == 67:   # C — Copy
+                inner.event_generate('<<Copy>>');      return 'break'
+            if kc == 88:   # X — Cut
+                inner.event_generate('<<Cut>>');       return 'break'
+            if kc == 65:   # A — Select All
+                inner.event_generate('<<SelectAll>>'); return 'break'
 
         inner.bind('<Control-KeyPress>', _ctrl_any, add=True)
         if platform.system() == 'Darwin':
@@ -581,6 +602,7 @@ class PhotoUploaderApp(ctk.CTk):
                 data = json.load(f)
             self.profiles = data.get('profiles', {'Default':{'a':'','s':'','p':'','w':''}})
             self.current_profile_name = data.get('last_profile','Default')
+            self.strip_ai_var.set(data.get('strip_ai', False))
         except:
             self.profiles = {'Default':{'a':'','s':'','p':'','w':''}}
         self._refresh_profile_ui()
@@ -594,7 +616,8 @@ class PhotoUploaderApp(ctk.CTk):
         }
         with open(CONFIG_FILE,'w') as f:
             json.dump({'profiles':self.profiles,
-                       'last_profile':self.current_profile_name}, f)
+                       'last_profile':self.current_profile_name,
+                       'strip_ai':self.strip_ai_var.get()}, f)
 
     def _refresh_profile_ui(self):
         self.profile_menu.configure(values=list(self.profiles.keys()))
@@ -691,15 +714,19 @@ class PhotoUploaderApp(ctk.CTk):
             self.log(f'→ Відео: {w}x{h} {codec} {dur:.1f}s')
             enc, enc_args = self._detect_hw_encoder(ff)
             self.log('→ Конвертація...')
+            # Універсальний фільтр: масштабуємо коротшу сторону до 720,
+            # потім кроп по центру до 720x1280, потім pad до парних
+            vf = ("scale=w='if(gt(iw/ih,720/1280),-2,720)':h='if(gt(iw/ih,720/1280),1280,-2)',"
+                  "crop=720:1280,pad=ceil(iw/2)*2:ceil(ih/2)*2")
             cmd = [ff,'-y','-i',path,'-t','14',
-                   '-vf','scale=-2:1280,crop=720:ih',
+                   '-vf', vf,
                    '-c:v',enc, *enc_args,
                    '-b:v','12000k','-minrate','10000k',
                    '-maxrate','15000k','-bufsize','20000k',
                    '-c:a','aac','-b:a','128k','-threads','0', TEMP_VIDEO]
             r = subprocess.run(cmd, capture_output=True, timeout=120)
             if r.returncode != 0:
-                self.log(f'FFmpeg помилка: {r.stderr.decode(errors="ignore")[-300:]}')
+                self.log(f'FFmpeg помилка: {r.stderr.decode(errors="ignore")[-800:]}')
                 return None, None
             sz = os.path.getsize(TEMP_VIDEO)
             self.log(f'→ Готово: {sz//1024}KB ({time.time()-t0:.1f}с)')
@@ -1027,12 +1054,31 @@ class PhotoUploaderApp(ctk.CTk):
     def stop(self):
         self.is_running = False
 
+    def _extract_html_body_text(self, text):
+        """Витягує видимий текст з <body>, обрізає CSS/скрипти."""
+        try:
+            soup = BeautifulSoup(text, 'html.parser')
+            for tag in soup(['style','script','head']):
+                tag.decompose()
+            body_text = soup.get_text(' ', strip=True)
+            return body_text[:800] if body_text else '(порожня відповідь)'
+        except:
+            # fallback: наївне очищення
+            import re as _re
+            clean = _re.sub(r'<style[^>]*>.*?</style>', '', text, flags=_re.DOTALL|_re.I)
+            clean = _re.sub(r'<script[^>]*>.*?</script>', '', clean, flags=_re.DOTALL|_re.I)
+            clean = _re.sub(r'<head[^>]*>.*?</head>', '', clean, flags=_re.DOTALL|_re.I)
+            clean = _re.sub(r'<[^>]+>', ' ', clean)
+            clean = _re.sub(r'\s+', ' ', clean).strip()
+            return clean[:800] if clean else '(порожня відповідь)'
+
     def _is_success(self, text, status_code):
         if status_code == 302:
             return True
         t = text.lower()
         # explicit success markers
-        for marker in ('successful','success','upload ok','uploadok','上传成功'):
+        for marker in ('successful','success','upload ok','uploadok','上传成功',
+                        'uploaded','完成','album_update','photo has been'):
             if marker in t:
                 return True
         # Mail Photos success: server redirects to Lady Profile page
@@ -1041,6 +1087,15 @@ class PhotoUploaderApp(ctk.CTk):
         # Private Photos success: same profile page pattern
         if '<title>lady' in t:
             return True
+        # Short Video success: page with album list or confirmation form
+        if 'short_video_album' in t and 'error' not in t:
+            return True
+        # Generic: HTML page returned without error keywords = likely OK
+        if status_code == 200 and '<html' in t:
+            err_markers = ('error','fail','denied','reject','invalid','expired',
+                           'помилка','ошибка','відхилено')
+            if not any(e in t for e in err_markers):
+                return True
         return False
 
     def _prepare_photo(self, path):
@@ -1051,15 +1106,65 @@ class PhotoUploaderApp(ctk.CTk):
             pass
         if img.mode != 'RGB':
             img = img.convert('RGB')
+
+      # ── Strip AI traces if enabled (Bypass SynthID) ──
+        if self.strip_ai_var.get():
+            self.log('→ Жорстке знищення SynthID та метаданих...')
+            
+            # 1) Абсолютное удаление метаданных
+            clean = Image.new('RGB', img.size)
+            clean.putdata(list(img.getdata()))
+            img = clean
+
+            w, h = img.size
+            
+            # 2) Масштабирование (туда-сюда) — убивает высокочастотные водяные знаки
+            down_size = (int(w * 0.85), int(h * 0.85))
+            img = img.resize(down_size, Image.Resampling.BILINEAR)
+            img = img.resize((w, h), Image.Resampling.BICUBIC)
+            
+            # 3) Микро-ротация — ломает пространственную сетку SynthID
+            angle = random.uniform(-0.4, 0.4)
+            img = img.rotate(angle, resample=Image.Resampling.BICUBIC, expand=False)
+            
+            # 4) Субпиксельный блюр + жесткий Unsharp Mask — переписывает пиксельные градиенты
+            img = img.filter(ImageFilter.GaussianBlur(radius=0.5))
+            img = img.filter(ImageFilter.UnsharpMask(radius=1.5, percent=120, threshold=3))
+
+            # 5) Динамический Гауссовский шум (лучше обычного random)
+            arr = np.array(img, dtype=np.int16)
+            noise = np.random.normal(0, 3.0, arr.shape).astype(np.int16)
+            arr = np.clip(arr + noise, 0, 255).astype(np.uint8)
+            img = Image.fromarray(arr)
+
+            # 6) Жесткая микро-обрезка со сдвигом — сбивает якоря детектора
+            crop_amount = random.randint(3, 6)
+            img = img.crop((crop_amount, crop_amount, w - crop_amount, h - crop_amount))
+            img = img.resize((w, h), Image.Resampling.LANCZOS)
+
+            self.log('→ SynthID та ІІ відбитки випалено')
+
         w, h = img.size
+        min_side = min(w, h)
         max_side = max(w, h)
+        self.log(f'→ Розмір оригіналу: {w}x{h} (min={min_side}, max={max_side})')
+        # Сайт вимагає ОБИДВІ сторони в діапазоні 800-3200
         if max_side > 3200:
             img.thumbnail((3200,3200), Image.Resampling.LANCZOS)
             self.log(f'→ Зменшено: {w}x{h} → {img.size[0]}x{img.size[1]}')
-        elif max_side < 800:
-            scale = 800 / max_side
-            img = img.resize((int(w*scale), int(h*scale)), Image.Resampling.LANCZOS)
+            w, h = img.size
+            min_side = min(w, h)
+        if min_side < 800:
+            scale = 800 / min_side
+            new_w, new_h = int(w*scale), int(h*scale)
+            # перевіряємо щоб не вийти за 3200
+            if max(new_w, new_h) > 3200:
+                scale = 3200 / max(w, h)
+                new_w, new_h = int(w*scale), int(h*scale)
+            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
             self.log(f'→ Збільшено: {w}x{h} → {img.size[0]}x{img.size[1]}')
+        w, h = img.size
+        self.log(f'→ Фінальний розмір: {w}x{h}')
 
         quality = 95
         img.save(TEMP_IMAGE, 'JPEG', quality=quality)
@@ -1246,7 +1351,7 @@ class PhotoUploaderApp(ctk.CTk):
                             self.log(f'→ Статус: {r.status_code}')
                             success = self._is_success(r.text, r.status_code)
                             if not success:
-                                self.log(f'→ Відповідь: {r.text.replace(chr(10)," ")[:300]}')
+                                self.log(f'→ Відповідь: {self._extract_html_body_text(r.text)}')
                         except Exception as e:
                             self.log(f'Помилка реєстрації: {e}')
                 else:
@@ -1305,7 +1410,7 @@ class PhotoUploaderApp(ctk.CTk):
                         self.log(f'→ Статус: {res.status_code}')
                         success = self._is_success(res.text, res.status_code)
                         if not success:
-                            self.log(f'→ Відповідь: {res.text.replace(chr(10)," ")[:300]}')
+                            self.log(f'→ Відповідь: {self._extract_html_body_text(res.text)}')
                     except requests.exceptions.Timeout:
                         self.log(f'Таймаут! Файл {file_kb}KB, ліміт {upload_timeout}с')
                     except Exception as e:
