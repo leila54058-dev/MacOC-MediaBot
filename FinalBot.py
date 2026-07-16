@@ -57,10 +57,10 @@ else:
 os.chdir(APP_DIR)
 CONFIG_FILE = os.path.join(APP_DIR, 'profiles_v99.json')
 # Тимчасові файли в /tmp — APP_DIR може бути read-only на macOS
-_TMP       = tempfile.gettempdir()
-TEMP_IMAGE = os.path.join(_TMP, 'cd_temp.jpg')
-TEMP_VIDEO = os.path.join(_TMP, 'cd_video.mp4')
-TEMP_THUMB = os.path.join(_TMP, 'cd_thumb.jpg')
+_TMP        = tempfile.gettempdir()
+TEMP_IMAGE  = os.path.join(_TMP, 'cd_temp.jpg')
+TEMP_VIDEO  = os.path.join(_TMP, 'cd_video.mp4')
+TEMP_THUMB  = os.path.join(_TMP, 'cd_thumb.jpg')
 
 ctk.set_appearance_mode('Dark')
 
@@ -112,7 +112,8 @@ class PhotoUploaderApp(ctk.CTk):
             except Exception:
                 pass
 
-        # FIX MAC: знімаємо quarantine та встановлюємо права на ffmpeg/ffprobe
+        # FIX MAC: знімаємо quarantine та ставимо права на ffmpeg/ffprobe —
+        # без цього macOS блокує запуск бінарників з .app
         if platform.system() == 'Darwin':
             for _name in ('ffmpeg', 'ffprobe'):
                 for _d in [_BIN_DIR,
@@ -129,7 +130,7 @@ class PhotoUploaderApp(ctk.CTk):
                             os.chmod(_p, 0o755)
                             subprocess.run(['xattr', '-rd', 'com.apple.quarantine', _p],
                                            capture_output=True)
-                        except:
+                        except Exception:
                             pass
 
         self._create_ui()
@@ -151,6 +152,7 @@ class PhotoUploaderApp(ctk.CTk):
         self._C = C
         self.configure(fg_color=C['bg'])
         self.title('CharmDate Media Center v99.0')
+        # FIX MAC: на Retina 960x720 виглядає крихітним + вікно не розтягувалось
         if platform.system() == 'Darwin':
             self.geometry('1100x820')
         else:
@@ -399,7 +401,7 @@ class PhotoUploaderApp(ctk.CTk):
         _show = lambda e: menu.tk_popup(e.x_root, e.y_root)
         w.bind('<Button-3>', _show)
         if platform.system() == 'Darwin':
-            w.bind('<Button-2>', _show)  # Control+click на трекпаді macOS
+            w.bind('<Button-2>', _show)   # Control+click на трекпаді macOS
 
         def _ctrl_any(event):
             kc = event.keycode
@@ -414,7 +416,7 @@ class PhotoUploaderApp(ctk.CTk):
 
         inner.bind('<Control-KeyPress>', _ctrl_any, add=True)
         if platform.system() == 'Darwin':
-            # macOS: Command замість Control
+            # macOS: буфер обміну — Command, а не Control
             w.bind('<Command-v>', lambda e: (inner.event_generate('<<Paste>>'),     'break')[1])
             w.bind('<Command-c>', lambda e: (inner.event_generate('<<Copy>>'),      'break')[1])
             w.bind('<Command-x>', lambda e: (inner.event_generate('<<Cut>>'),       'break')[1])
@@ -671,6 +673,8 @@ class PhotoUploaderApp(ctk.CTk):
 
     # ── ffmpeg ───────────────────────────────────────────────────────────────
     def _get_ffmpeg(self):
+        # FIX MAC: на macOS бінарник зветься 'ffmpeg' без .exe, і лежить
+        # усередині .app — перевіряємо всі можливі місця
         candidates = [os.path.join(_BIN_DIR, 'ffmpeg'),
                       os.path.join(APP_DIR,  'ffmpeg')]
         if getattr(sys, 'frozen', False):
@@ -678,26 +682,49 @@ class PhotoUploaderApp(ctk.CTk):
             candidates += [
                 os.path.join(_exe, 'bin', 'ffmpeg'),
                 os.path.normpath(os.path.join(_exe, '..', 'Resources', 'bin', 'ffmpeg')),
-                os.path.join(_BIN_DIR, 'ffmpeg.exe'),
-                os.path.join(APP_DIR,  'ffmpeg.exe'),
             ]
+        candidates += [os.path.join(_BIN_DIR, 'ffmpeg.exe'),
+                       os.path.join(APP_DIR,  'ffmpeg.exe')]
         for c in candidates:
             if os.path.exists(c):
                 return c
         return 'ffmpeg'
 
     def _get_ffprobe(self):
+        # FIX: не replace() — зламався б шлях, де 'ffmpeg' є в назві папки
         ff = self._get_ffmpeg()
-        fp = os.path.join(os.path.dirname(ff), 'ffprobe')
-        return fp if os.path.exists(fp) else 'ffprobe'
+        d  = os.path.dirname(ff)
+        for n in ('ffprobe', 'ffprobe.exe'):
+            p = os.path.join(d, n)
+            if os.path.exists(p):
+                return p
+        return 'ffprobe'
+
+    # ── Параметри під правила сайту ──────────────────────────────────────────
+    # Duration 8-15s | Pixels 720-1280 | Bitrate >10000kbps | Size <=40MB
+    VID_SECS   = 14        # -t: ріже довгі до 14с (в межах 8-15)
+    VID_MIN_S  = 8.0       # коротше — сайт відхилить
+    VID_KBPS   = 12000     # цільовий бітрейт (з запасом над 10000)
+    VID_MAX_MB = 40
 
     def _detect_hw_encoder(self, ff):
+        # CBR-параметри для кожного енкодера — БЕЗ них бітрейт провалюється
+        # нижче 10000kbps на статичних сценах (перевірено: 85kbps!)
+        K = self.VID_KBPS
         if platform.system() == 'Darwin':
-            encs = [('h264_videotoolbox', ['-realtime', 'true'])]
+            encs = [('h264_videotoolbox',
+                     ['-realtime','true','-b:v',f'{K}k','-maxrate',f'{K}k',
+                      '-bufsize',f'{K}k'])]
         else:
-            encs = [('h264_nvenc',['-preset','p1','-tune','ll']),
-                    ('h264_amf',['-quality','speed']),
-                    ('h264_qsv',['-preset','veryfast'])]
+            encs = [('h264_nvenc',
+                     ['-preset','p4','-rc','cbr','-b:v',f'{K}k',
+                      '-maxrate',f'{K}k','-bufsize',f'{K}k']),
+                    ('h264_amf',
+                     ['-usage','transcoding','-rc','cbr','-b:v',f'{K}k',
+                      '-maxrate',f'{K}k','-bufsize',f'{K}k']),
+                    ('h264_qsv',
+                     ['-preset','veryfast','-b:v',f'{K}k',
+                      '-maxrate',f'{K}k','-bufsize',f'{K}k'])]
         for enc, args in encs:
             try:
                 r = subprocess.run(
@@ -710,56 +737,172 @@ class PhotoUploaderApp(ctk.CTk):
             except:
                 pass
         self.log('→ CPU: libx264')
-        return 'libx264', ['-preset','ultrafast']
+        return 'libx264', self._cpu_enc_args()
+
+    def _cpu_enc_args(self):
+        # nal-hrd=cbr ГАРАНТУЄ бітрейт (доповнює filler-даними).
+        # Без нього libx264 віддає 85kbps на статичному відео.
+        K = self.VID_KBPS
+        return ['-preset','veryfast','-b:v',f'{K}k','-minrate',f'{K}k',
+                '-maxrate',f'{K}k','-bufsize',f'{K}k',
+                '-x264-params','nal-hrd=cbr:force-cfr=1']
+
+    def _ff_root_error(self, stderr_bytes):
+        # Витягує ПЕРШУ справжню помилку. Раніше бралися останні 800 символів —
+        # там лише статистика енкодера, а причина губилась.
+        txt = stderr_bytes.decode(errors='ignore')
+        skip = ('task finished with error code', 'terminating thread',
+                'conversion failed', 'nothing was written')
+        keys = ('error', 'invalid', 'unsupported', 'not supported', 'could not',
+                'unable to', 'no such', 'failed', 'cannot', 'incorrect',
+                'does not contain', 'no decoder')
+        hits = []
+        for ln in txt.splitlines():
+            low = ln.lower()
+            if any(s in low for s in skip):
+                continue
+            if any(k in low for k in keys):
+                ln = ln.strip()
+                if ln and ln not in hits:
+                    hits.append(ln)
+            if len(hits) >= 3:
+                break
+        return ' | '.join(hits) if hits else txt.strip()[-300:]
 
     def _probe(self, path, ffprobe):
+        """(w, h, codec, duration, pix_fmt). duration читаємо з format —
+        у MKV та частині MOV поля stream=duration просто немає."""
+        w = h = 0; codec = ''; pix = ''; dur = 0.0
         try:
             r = subprocess.run(
                 [ffprobe,'-v','error','-select_streams','v:0',
-                 '-show_entries','stream=width,height,codec_name,duration',
+                 '-show_entries','stream=width,height,codec_name,pix_fmt',
                  '-of','json', path],
-                capture_output=True, timeout=10)
-            s = json.loads(r.stdout).get('streams',[{}])[0]
-            return (int(s.get('width',0)), int(s.get('height',0)),
-                    s.get('codec_name',''), float(s.get('duration',99)))
-        except:
-            return 0, 0, '', 99
+                capture_output=True, timeout=15)
+            st = json.loads(r.stdout or '{}').get('streams', [])
+            if st:
+                s = st[0]
+                w     = int(s.get('width')  or 0)
+                h     = int(s.get('height') or 0)
+                codec = s.get('codec_name') or ''
+                pix   = s.get('pix_fmt')    or ''
+        except Exception:
+            pass
+        try:
+            r = subprocess.run(
+                [ffprobe,'-v','error','-show_entries','format=duration',
+                 '-of','json', path],
+                capture_output=True, timeout=15)
+            d = json.loads(r.stdout or '{}').get('format', {}).get('duration')
+            if d and d != 'N/A':
+                dur = float(d)
+        except Exception:
+            pass
+        return w, h, codec, dur, pix
+
+    def _bitrate_kbps(self, path, dur):
+        try:
+            if not dur:
+                return 0
+            return int(os.path.getsize(path) * 8 / dur / 1000)
+        except Exception:
+            return 0
 
     def process_video_dan(self, path):
         try:
             t0 = time.time()
             ff = self._get_ffmpeg(); fp = self._get_ffprobe()
-            w, h, codec, dur = self._probe(path, fp)
-            self.log(f'→ Відео: {w}x{h} {codec} {dur:.1f}s')
+            w, h, codec, dur, pix = self._probe(path, fp)
+            self.log(f'→ Відео: {w}x{h} {codec} {pix or "?"} {dur:.1f}s')
+
+            if not w or not h:
+                self.log('[!] Не вдалося прочитати відеопотік. Файл пошкоджений?')
+                return None, None
+
+            # ПРАВИЛО 8-15с: -t ріже довгі, але коротке відео не подовжить
+            if dur and dur < self.VID_MIN_S:
+                self.log(f'[!] Тривалість {dur:.1f}с < {self.VID_MIN_S:.0f}с — '
+                         f'сайт відхилить. Пропускаю.')
+                return None, None
+
             enc, enc_args = self._detect_hw_encoder(ff)
+
+            # format=yuv420p ОБОВ'ЯЗКОВИЙ: iPhone HDR = 10-бітний HEVC,
+            # апаратні енкодери 10 біт на H.264 не приймають → "Invalid data"
+            vf = ('scale=720:1280:force_original_aspect_ratio=increase,'
+                  'crop=720:1280,format=yuv420p')
+
+            def _run(encoder, eargs):
+                cmd = [ff,'-y','-fflags','+genpts','-i',path,
+                       '-map','0:v:0','-map','0:a:0?',
+                       '-t',str(self.VID_SECS),
+                       '-vf', vf,
+                       '-c:v',encoder, *eargs,
+                       '-pix_fmt','yuv420p',
+                       '-c:a','aac','-b:a','128k','-ac','2',
+                       '-movflags','+faststart', TEMP_VIDEO]
+                return subprocess.run(cmd, capture_output=True, timeout=240)
+
             self.log('→ Конвертація...')
-            # Універсальний фільтр: масштабуємо коротшу сторону до 720,
-            # потім кроп по центру до 720x1280, потім pad до парних
-            vf = ("scale=w='if(gt(iw/ih,720/1280),-2,720)':h='if(gt(iw/ih,720/1280),1280,-2)',"
-                  "crop=720:1280,pad=ceil(iw/2)*2:ceil(ih/2)*2")
-            cmd = [ff,'-y','-i',path,'-t','14',
-                   '-vf', vf,
-                   '-c:v',enc, *enc_args,
-                   '-b:v','12000k','-minrate','10000k',
-                   '-maxrate','15000k','-bufsize','20000k',
-                   '-c:a','aac','-b:a','128k','-threads','0', TEMP_VIDEO]
-            r = subprocess.run(cmd, capture_output=True, timeout=120)
+            r = _run(enc, enc_args)
+
+            # Апаратний енкодер впав → CPU (libx264 їсть будь-який формат)
+            if r.returncode != 0 and enc != 'libx264':
+                self.log(f'[!] {enc}: {self._ff_root_error(r.stderr)}')
+                self.log('→ Повтор через CPU (libx264)...')
+                enc = 'libx264'
+                r = _run('libx264', self._cpu_enc_args())
+
             if r.returncode != 0:
-                self.log(f'FFmpeg помилка: {r.stderr.decode(errors="ignore")[-800:]}')
+                self.log(f'FFmpeg помилка: {self._ff_root_error(r.stderr)}')
                 return None, None
+            if not os.path.exists(TEMP_VIDEO) or os.path.getsize(TEMP_VIDEO) < 2048:
+                self.log('[!] Вихідний файл порожній.')
+                return None, None
+
+            ow, oh, _oc, odur, _op = self._probe(TEMP_VIDEO, fp)
+            kbps = self._bitrate_kbps(TEMP_VIDEO, odur)
+
+            # Апаратний енкодер не дотягнув бітрейт → CPU з CBR (гарантує)
+            if kbps and kbps < 10000 and enc != 'libx264':
+                self.log(f'[!] {enc} дав {kbps}kbps < 10000. Повтор через CPU...')
+                r = _run('libx264', self._cpu_enc_args())
+                if r.returncode == 0 and os.path.exists(TEMP_VIDEO):
+                    ow, oh, _oc, odur, _op = self._probe(TEMP_VIDEO, fp)
+                    kbps = self._bitrate_kbps(TEMP_VIDEO, odur)
+
             sz = os.path.getsize(TEMP_VIDEO)
-            self.log(f'→ Готово: {sz//1024}KB ({time.time()-t0:.1f}с)')
-            if sz > 40 * 1024 * 1024:
-                self.log(f'Файл {sz//1024//1024}МБ > 40МБ ліміт!')
+            self.log(f'→ Готово: {ow}x{oh}, {odur:.1f}с, ~{kbps}kbps, '
+                     f'{sz//1024}KB (за {time.time()-t0:.1f}с)')
+
+            # Фінальна перевірка по правилах сайту
+            if odur and odur < self.VID_MIN_S:
+                self.log(f'[!] На виході {odur:.1f}с < {self.VID_MIN_S:.0f}с — відхилять.')
                 return None, None
-            subprocess.run(
-                [ff,'-y','-i',TEMP_VIDEO,'-ss','1','-vframes','1',
+            if kbps and kbps < 10000:
+                self.log(f'[!] УВАГА: {kbps}kbps < 10000 — сайт може відхилити.')
+            if sz > self.VID_MAX_MB * 1024 * 1024:
+                self.log(f'[!] {sz//1024//1024}МБ > {self.VID_MAX_MB}МБ ліміт!')
+                return None, None
+
+            # Прев'ю — з середини ролика + ПЕРЕВІРКА (раніше результат не
+            # перевірявся → міг піти старий кадр від попереднього відео)
+            try: os.remove(TEMP_THUMB)
+            except: pass
+            mid = max(0.5, (odur or 2.0) / 2)
+            rt = subprocess.run(
+                [ff,'-y','-ss',f'{mid:.2f}','-i',TEMP_VIDEO,'-frames:v','1',
                  '-vf','scale=720:1080:force_original_aspect_ratio=disable',
-                 TEMP_THUMB],
+                 '-q:v','2', TEMP_THUMB],
                 capture_output=True, timeout=30)
+            if rt.returncode != 0 or not os.path.exists(TEMP_THUMB) \
+                    or os.path.getsize(TEMP_THUMB) < 512:
+                self.log('[!] Прев\'ю не створено (сайт вимагає кадр з відео).')
+                return None, None
+
             return TEMP_VIDEO, TEMP_THUMB
         except subprocess.TimeoutExpired:
-            self.log('Таймаут!'); return None, None
+            self.log('Таймаут конвертації!'); return None, None
         except Exception as e:
             self.log(f'Помилка: {e}'); return None, None
 
